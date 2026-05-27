@@ -4,6 +4,8 @@ This document explains the experimental changes in `AEK_POW_BMS63CHAIN_app_mng.c
 
 The file may include ST-generated/demo code around the modified sections. Check your ST license before redistributing a complete source file.
 
+Additional modified files were found after scanning the supplied ST project ZIP. See [ADDITIONAL_MODIFIED_FILES.md](ADDITIONAL_MODIFIED_FILES.md).
+
 ## 1. Active-Cell Mask
 
 Added a hard mask for the physical cells that exist:
@@ -167,10 +169,12 @@ The code keeps key state in variables suitable for UDE watch windows:
 
 When applying this file to a recreated ST project:
 
-1. Confirm generated type names match.
-2. Confirm chain and device index constants match your project.
-3. Confirm floating-point `sprintf` works in your toolchain settings.
-4. Build with warnings enabled.
-5. Use serial commands and UDE watches before connecting a real pack.
+1. Reproduce the six-cell generated chain configuration.
+2. Apply or port the matching `AEK_POW_BMS63CHAIN_app_mng.h`.
+3. Confirm generated type names match.
+4. Confirm chain and device index constants match your project.
+5. Confirm floating-point `sprintf` works in your toolchain settings.
+6. Build with warnings enabled.
+7. Use serial commands and UDE watches before connecting a real pack.
 
 If your ST demo version differs, use these notes to port the modifications rather than assuming the file is drop-in compatible.

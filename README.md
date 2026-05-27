@@ -236,9 +236,17 @@ What bad looks like:
 1. Install the required ST AutoDevKit / SPC5Studio environment and packages for the AEK-POW-BMS63EN / SPC58EC demo.
 2. Recreate or import the ST `BMS_CHAIN` demo project using ST-provided materials.
 3. Build the original demo once to confirm the toolchain, components, linker script, and board configuration are correct.
-4. Replace the generated/demo `source/AEK_POW_BMS63CHAIN_app_mng.c` with [firmware/modified_files/AEK_POW_BMS63CHAIN_app_mng.c](firmware/modified_files/AEK_POW_BMS63CHAIN_app_mng.c).
-5. Rebuild.
-6. Review compiler warnings carefully, especially around toolchain library declarations and generated component APIs.
+4. Reproduce the six-active-cell generated configuration: CELL1, CELL2, CELL3, CELL4, CELL13, and CELL14 enabled; CELL5-CELL12 disabled.
+5. Apply or port the modified files in [firmware/modified_files](firmware/modified_files/), especially:
+   - `AEK_POW_BMS63CHAIN_app_mng.c`
+   - `AEK_POW_BMS63CHAIN_app_mng.h`
+   - `main.c`
+   - `AEK_POW_BMS63CHAIN_chain_cfg.c`
+   - `AEK_POW_BMS63CHAIN_iso_mng.c`
+6. Rebuild.
+7. Review compiler warnings carefully, especially around toolchain library declarations and generated component APIs.
+
+Details: [firmware/modified_files/ADDITIONAL_MODIFIED_FILES.md](firmware/modified_files/ADDITIONAL_MODIFIED_FILES.md).
 
 If your ST license does not allow redistributing the complete generated project, publish only patches and modified files, and instruct users to recreate the base project using ST AutoDevKit.
 
