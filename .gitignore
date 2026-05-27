@@ -1,0 +1,52 @@
+# Local source artifacts supplied for setup, not part of the cleaned repo
+/*.zip
+/*.jpg
+/*.jpeg
+/*.png
+
+# Keep organized repository images
+!images/
+!images/**
+
+# ST AutoDevKit / SPC5Studio build outputs
+**/build/
+**/.dep/
+**/Debug/
+**/Release/
+**/lst/
+**/obj/
+**/mcs/
+*.o
+*.obj
+*.d
+*.lst
+*.map
+*.elf
+*.hex
+*.mot
+*.bin
+*.dmp
+*.sq3
+
+# Local full generated projects are intentionally not committed by default
+firmware/full_project/*
+!firmware/full_project/README.md
+
+# IDE and local metadata
+.metadata/
+.recommenders/
+.settings/
+*.launch
+*.wsx
+*.log
+*.tmp
+*.bak
+*.orig
+
+# UDE generated reports and connection logs
+__connection_failed_report__*.txt
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
