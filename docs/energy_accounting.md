@@ -29,11 +29,11 @@ Ibal = 3.5 / 39 = 0.0897 A, about 90 mA
 Pbal = 3.5 * 3.5 / 39 = 0.314 W
 ```
 
-With 60 s ON / 60 s OFF pulsing:
+With the current 180 s ON / 60 s OFF pulsing:
 
 ```text
-average current ~= 90 mA * 0.5 = 45 mA
-average power   ~= 0.314 W * 0.5 = 0.157 W
+average current ~= 90 mA * 0.75 = 67.5 mA
+average power   ~= 0.314 W * 0.75 = 0.236 W
 ```
 
 ## Removed Charge
@@ -86,16 +86,16 @@ This is only a rough indication. It does not replace coulomb counting or calibra
 
 ## Why Passive Balancing Is Slow
 
-Passive balancing current is small because the board dissipates excess charge as heat through resistors. At about 90 mA ON current and 50 percent duty cycle, the average removal rate is about 45 mA.
+Passive balancing current is small because the board dissipates excess charge as heat through resistors. At about 90 mA ON current and the current 180 s ON / 60 s OFF schedule, the average removal rate is about 67 mA if AUTO remains active and no safety condition interrupts it.
 
 That means:
 
 ```text
-20 min at 45 mA average ~= 15 mAh
-30 min at 45 mA average ~= 22.5 mAh
+20 min at 67 mA average ~= 22 mAh
+30 min at 67 mA average ~= 34 mAh
 ```
 
-So a 20-30 minute test may remove only about 15-25 mAh from a selected high cell. That is enough to validate the accounting, but not necessarily enough to visibly equalize a large imbalance.
+So a 20-30 minute test may remove only a few tens of mAh from a selected high cell. That is enough to validate the accounting, but not necessarily enough to visibly equalize a large imbalance.
 
 ## Why Voltage Drop Is Not Linear
 
@@ -117,7 +117,7 @@ During charge or discharge, measured cell voltage includes load-dependent effect
 The bench firmware uses a near-rest current threshold around:
 
 ```text
-abs(pack_current) <= 0.05 A
+abs(pack_current) <= 0.1 A
 ```
 
 For characterization logs, record pack current with every balancing event.

@@ -12,6 +12,8 @@ BAL OFF
 TRIM?
 FAULT?
 BAL SAFETY?
+BAL TEST?
+BAL PHASE?
 BAL SUMMARY?
 BAL ENERGY RESET
 BAL AUTO
@@ -36,6 +38,8 @@ S1
 | `BAL STATE?` | Report the current AUTO/balancing state |
 | `BAL SUMMARY?` | Report active-cell min/max, delta, selected cell, and energy summary |
 | `BAL SAFETY?` | Report whether the safety gate allows balancing |
+| `BAL TEST?` | Compact safety, SPI, VREF/current, strategy, mask, and recovery status |
+| `BAL PHASE?` | Current OFF/BALANCING/COOLDOWN/BLOCKED phase and timing |
 | `BAL ENERGY?` | Report per-active-cell ON time, removed mAh, Wh, and estimated SOC removed |
 | `BAL ENERGY RESET` | Reset balancing energy counters |
 | `BAL STRATEGY?` | Report current balancing strategy |
@@ -84,6 +88,23 @@ BAL CELL 4 OFF
 | `FAULT?` | Print relevant fault/status flags |
 | `AUTO?` | Print AUTO debug details |
 | `BAL SAFETY?` | Print safety gate summary |
+| `BAL TEST?` | Print compact safety and communication summary |
+| `BAL PHASE?` | Print current balancing phase |
+| `BAL RECOVER` | Clear software recovery state only if real measurements are healthy |
+| `BAL AUTORECOVER ON` | Enable automatic software recovery attempts |
+| `BAL AUTORECOVER OFF` | Disable automatic software recovery attempts |
+
+Advanced software-only injection commands are present for parser/safety testing:
+
+```text
+BAL INJECT VREF
+BAL INJECT CELL
+BAL INJECT FRAME
+BAL INJECT RX
+BAL INJECT CLEAR
+```
+
+These commands should not call low-level SPI-clearing functions directly. They are intended to test safety blocking and serial responsiveness without forcing hardware recovery operations from the command parser.
 
 Example trim report:
 
@@ -150,6 +171,8 @@ For characterization, log:
 - `AUTO?`;
 - `BAL?`;
 - `BAL SUMMARY?`;
+- `BAL TEST?`;
+- `BAL PHASE?`;
 - `BAL ENERGY?`;
 - selected applied mask;
 - DMM spot checks;

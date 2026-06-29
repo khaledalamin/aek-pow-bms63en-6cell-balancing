@@ -110,15 +110,17 @@ extern unsigned long strtoul(const char *nptr, char **endptr, int base);
 
 /*
  * Balance only when pack current is very small.
- * Your idle current is around 0.0003-0.0008 A, so 0.05 A is generous.
+ * The old 0.05 A gate was too close to the board's observed idle draw.
+ * Keep 0.1 A for this bench characterization snapshot.
  */
-#define AEK_POW_BMS63CHAIN_BAL_AUTO_MAX_CURRENT_A          0.05F
+#define AEK_POW_BMS63CHAIN_BAL_AUTO_MAX_CURRENT_A          0.1F   // was 0.05F: board's own ~46mA quiescent draw trips the old 50mA gate
 
 /*
  * Pulse/cooldown.
- * You tested 60 s ON / 60 s OFF without heating, so we keep it.
+ * Earlier 60 s ON / 60 s OFF tests were thermally acceptable.
+ * Current characterization uses 180 s ON / 60 s OFF.
  */
-#define AEK_POW_BMS63CHAIN_BAL_AUTO_PULSE_MS               60000U
+#define AEK_POW_BMS63CHAIN_BAL_AUTO_PULSE_MS               180000U
 #define AEK_POW_BMS63CHAIN_BAL_AUTO_COOLDOWN_MS            60000U
 
 #define AEK_POW_BMS63CHAIN_BAL_AUTO_INVALID_CELL           0xFFU
@@ -136,6 +138,40 @@ extern unsigned long strtoul(const char *nptr, char **endptr, int base);
 #define AEK_POW_BMS63CHAIN_BAL_STRATEGY_MULTI2             1U
 #define AEK_POW_BMS63CHAIN_BAL_MULTI_MAX_CELLS             2U
 #define AEK_POW_BMS63CHAIN_BAL_MULTI_MAX_POWER_W           0.75F
+
+
+/*
+ * Communication / measurement recovery watchdog.
+ * Healthy values observed in UDE on this project:
+ *   SPI_TXRX RX_COMPLETED = 3
+ *   SPI_FRAME_NO_ERROR    = 4
+ *   SPI_GSW_NO_ERROR      = 0
+ */
+#define AEK_POW_BMS63CHAIN_APP_SPI_RX_COMPLETED_VALUE       3
+#define AEK_POW_BMS63CHAIN_APP_SPI_FRAME_NO_ERROR_VALUE     4
+#define AEK_POW_BMS63CHAIN_APP_SPI_GSW_NO_ERROR_VALUE       0
+
+#define AEK_POW_BMS63CHAIN_COMM_BAD_LIMIT                   3U
+#define AEK_POW_BMS63CHAIN_COMM_GOOD_RESUME_LIMIT           3U
+#define AEK_POW_BMS63CHAIN_SPI_RX_WAIT_TIMEOUT_MS           3000U
+#define AEK_POW_BMS63CHAIN_RECOVERY_SETTLE_MS               10000U
+#define AEK_POW_BMS63CHAIN_MAX_AUTO_RECOVERIES              3U
+
+/*
+ * Do not evaluate the recovery watchdog on every fast control-loop pass.
+ * This keeps serial commands responsive and prevents the watchdog counters
+ * from racing too fast.
+ */
+#define AEK_POW_BMS63CHAIN_RECOVERY_WATCHDOG_PERIOD_MS      500U
+
+/*
+ * Hard plausibility limits. These are NOT normal balancing limits.
+ * They catch impossible communication/measurement states such as 5.5 V/cell.
+ */
+#define AEK_POW_BMS63CHAIN_SAFE_VREF_MIN                    4.50F
+#define AEK_POW_BMS63CHAIN_SAFE_VREF_MAX                    5.20F
+#define AEK_POW_BMS63CHAIN_SAFE_CELL_MIN_PLAUSIBLE          2.00F
+#define AEK_POW_BMS63CHAIN_SAFE_CELL_MAX_PLAUSIBLE          4.35F
 
 
 
@@ -175,6 +211,51 @@ static uint32_t AEK_POW_BMS63CHAIN_balOnTimeMs[14] = {0U};
 
 static uint32_t AEK_POW_BMS63CHAIN_balAccountingLastMs = 0U;
 
+
+typedef enum
+{
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_OK = 0,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_RX,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_FRAME,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_GSW,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CELL_VOLT,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CURRENT,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_MANUAL,
+    AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_RECOVERY_LOCKOUT
+} AEK_POW_BMS63CHAIN_balSafetyState_t;
+
+typedef enum
+{
+    AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE = 0,
+    AEK_POW_BMS63CHAIN_FAULT_INJECT_SPI_FRAME,
+    AEK_POW_BMS63CHAIN_FAULT_INJECT_SPI_RX,
+    AEK_POW_BMS63CHAIN_FAULT_INJECT_VREF,
+    AEK_POW_BMS63CHAIN_FAULT_INJECT_CELL_VOLT
+} AEK_POW_BMS63CHAIN_faultInject_t;
+
+static volatile AEK_POW_BMS63CHAIN_balSafetyState_t
+    AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
+
+static volatile uint8_t AEK_POW_BMS63CHAIN_balAutoRecoverEnabled = 1U;
+
+static volatile AEK_POW_BMS63CHAIN_faultInject_t
+    AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+
+static uint8_t AEK_POW_BMS63CHAIN_commBadCount = 0U;
+static uint8_t AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+static uint32_t AEK_POW_BMS63CHAIN_commBlockedSinceMs = 0U;
+static uint32_t AEK_POW_BMS63CHAIN_commRecoveryCount = 0U;
+static uint32_t AEK_POW_BMS63CHAIN_spiRxWaitStartMs = 0U;
+static uint32_t AEK_POW_BMS63CHAIN_lastRecoveryWatchdogMs = 0U;
+
+static uint32_t AEK_POW_BMS63CHAIN_lastGoodObsMs = 0U;
+static float AEK_POW_BMS63CHAIN_lastGoodVref = 0.0F;
+static float AEK_POW_BMS63CHAIN_lastGoodCurrent = 0.0F;
+static float AEK_POW_BMS63CHAIN_lastGoodCellV[14] = {0.0F};
+
 static uint16_t AEK_POW_BMS63CHAIN_app_getActualBalMask(void);
 static const char *AEK_POW_BMS63CHAIN_app_balModeText(void);
 static const char *AEK_POW_BMS63CHAIN_app_autoStateText(void);
@@ -201,6 +282,12 @@ static void AEK_POW_BMS63CHAIN_app_sendFaultReport(void);
 static void AEK_POW_BMS63CHAIN_app_sendTrimReport(void);
 
 static void AEK_POW_BMS63CHAIN_app_sendAutoDebug(void);
+static void AEK_POW_BMS63CHAIN_app_forceBalancingOffOnChip(void);
+static const char *AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState_t state);
+static const char *AEK_POW_BMS63CHAIN_app_faultInjectText(void);
+static void AEK_POW_BMS63CHAIN_app_updateRecoveryWatchdog(AEK_POW_BMS63CHAIN_nodeData_t *nodeData);
+static void AEK_POW_BMS63CHAIN_app_sendBalTest(void);
+static void AEK_POW_BMS63CHAIN_app_sendBalPhase(void);
 
 static uint16_t AEK_POW_BMS63CHAIN_app_sanitizeBalMask(uint16_t requestedMask)
 {
@@ -238,8 +325,6 @@ static SerialConfig AEK_POW_BMS63CHAIN_serialBufferedConfig = {
 static void AEK_POW_BMS63CHAIN_app_updateBalancingAccounting(void);
 static void AEK_POW_BMS63CHAIN_app_sendBalancingEnergyReport(void);
 
-static void AEK_POW_BMS63CHAIN_app_sendBalancingSummary(void);
-
 
 AEK_POW_BMS63CHAIN_app_dataChain_t AEK_POW_BMS63CHAIN_app_dataChain[AEK_POW_BMS63CHAIN_CHAIN_NUM];
 extern AEK_POW_BMS63CHAIN_chain_t AEK_POW_BMS63CHAIN_chain[AEK_POW_BMS63CHAIN_CHAIN_NUM];
@@ -250,11 +335,9 @@ static void sendMessage(char *outputMessage);
 
 
 
-static uint8_t AEK_POW_BMS63CHAIN_app_balancingSafetyOk(void)
+static void AEK_POW_BMS63CHAIN_app_sendBalTest(void)
 {
-    uint8_t i;
-    uint16_t cellMask;
-    float vcell;
+    static char message[320];
 
     uint8_t chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
     uint8_t devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;
@@ -262,6 +345,159 @@ static uint8_t AEK_POW_BMS63CHAIN_app_balancingSafetyOk(void)
     AEK_POW_BMS63CHAIN_nodeData_t *nodeData =
         &AEK_POW_BMS63CHAIN_app_dataChain[chainidx]
             .AEK_POW_BMS63CHAIN_nodeData[devidx - 1U];
+
+    uint16_t actualMask = AEK_POW_BMS63CHAIN_app_getActualBalMask();
+
+    int txrx = (int)AEK_POW_BMS63CHAIN_chain[chainidx]
+        .AEK_POW_BMS63CHAIN_spi_chainConf
+        .AEK_POW_BMS63CHAIN_spi_txRxSts;
+
+    int frame = (int)AEK_POW_BMS63CHAIN_chain[chainidx]
+        .AEK_POW_BMS63CHAIN_spi_chainConf
+        .AEK_POW_BMS63CHAIN_spi_frameErrSts;
+
+    int gsw = (int)AEK_POW_BMS63CHAIN_chain[chainidx]
+        .AEK_POW_BMS63CHAIN_spi_chainConf
+        .AEK_POW_BMS63CHAIN_spi_GSWErrSts;
+
+    sprintf(message,
+            "OK;BAL_TEST;STATE;%s;MODE;%s;STRATEGY;%s;ACTUAL;0x%04X;AUTO_REQ;0x%04X;ACTIVE;%u;COOLDOWN;%u;AUTOREC;%u;INJECT;%s;BAD;%u;GOOD;%u;RECOV;%lu;VREF;%.4f;CURR;%.4f;SPI_TXRX;%d;SPI_FRAME;%d;SPI_GSW;%d;LAST_GOOD_MS;%lu;\r\n",
+            AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState),
+            AEK_POW_BMS63CHAIN_app_balModeText(),
+            AEK_POW_BMS63CHAIN_app_balStrategyText(),
+            (unsigned int)actualMask,
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoMask,
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoActive,
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoCooldown,
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoRecoverEnabled,
+            AEK_POW_BMS63CHAIN_app_faultInjectText(),
+            (unsigned int)AEK_POW_BMS63CHAIN_commBadCount,
+            (unsigned int)AEK_POW_BMS63CHAIN_commGoodCount,
+            (unsigned long)AEK_POW_BMS63CHAIN_commRecoveryCount,
+            nodeData->AEK_POW_BMS63CHAIN_Vref,
+            nodeData->AEK_POW_BMS63CHAIN_Pack_Current,
+            txrx,
+            frame,
+            gsw,
+            (unsigned long)AEK_POW_BMS63CHAIN_lastGoodObsMs);
+
+    sendMessage(message);
+}
+
+static void AEK_POW_BMS63CHAIN_app_sendBalPhase(void)
+{
+    static char message[256];
+
+    uint32_t nowMs = osalThreadGetMilliseconds();
+    uint32_t elapsedMs = nowMs - AEK_POW_BMS63CHAIN_balAutoTimerMs;
+    uint32_t remainMs = 0U;
+    const char *phaseText = "OFF";
+
+    if(AEK_POW_BMS63CHAIN_balSafetyState != AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+        phaseText = AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState);
+    }
+    else if(AEK_POW_BMS63CHAIN_balAutoActive != 0U){
+        phaseText = "BALANCING";
+
+        if(elapsedMs < AEK_POW_BMS63CHAIN_BAL_AUTO_PULSE_MS){
+            remainMs = AEK_POW_BMS63CHAIN_BAL_AUTO_PULSE_MS - elapsedMs;
+        }
+    }
+    else if(AEK_POW_BMS63CHAIN_balAutoCooldown != 0U){
+        phaseText = "COOLDOWN_TIMER";
+
+        if(elapsedMs < AEK_POW_BMS63CHAIN_BAL_AUTO_COOLDOWN_MS){
+            remainMs = AEK_POW_BMS63CHAIN_BAL_AUTO_COOLDOWN_MS - elapsedMs;
+        }
+    }
+
+    sprintf(message,
+            "OK;BAL_PHASE;PHASE;%s;STATE;%s;MODE;%s;STRATEGY;%s;ACTIVE;%u;COOLDOWN;%u;AUTO_REQ;0x%04X;ACTUAL;0x%04X;ELAPSED_S;%lu;REMAIN_S;%lu;AUTOREC;%u;RECOV;%lu;\r\n",
+            phaseText,
+            AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState),
+            AEK_POW_BMS63CHAIN_app_balModeText(),
+            AEK_POW_BMS63CHAIN_app_balStrategyText(),
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoActive,
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoCooldown,
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoMask,
+            (unsigned int)AEK_POW_BMS63CHAIN_app_getActualBalMask(),
+            (unsigned long)(elapsedMs / 1000U),
+            (unsigned long)(remainMs / 1000U),
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoRecoverEnabled,
+            (unsigned long)AEK_POW_BMS63CHAIN_commRecoveryCount);
+
+    sendMessage(message);
+}
+
+static void AEK_POW_BMS63CHAIN_app_sendBalancingSummary(void);
+
+
+static const char *AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState_t state)
+{
+    switch(state)
+    {
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_OK: return "OK";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_RX: return "BLOCKED_SPI_RX";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_FRAME: return "BLOCKED_SPI_FRAME";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_GSW: return "BLOCKED_SPI_GSW";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF: return "BLOCKED_VREF";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CELL_VOLT: return "BLOCKED_CELL_VOLT";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM: return "BLOCKED_TRIM";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT: return "BLOCKED_CRITICAL_FAULT";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CURRENT: return "BLOCKED_CURRENT";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_MANUAL: return "BLOCKED_MANUAL";
+        case AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_RECOVERY_LOCKOUT: return "BLOCKED_RECOVERY_LOCKOUT";
+        default: return "BLOCKED_UNKNOWN";
+    }
+}
+
+static const char *AEK_POW_BMS63CHAIN_app_faultInjectText(void)
+{
+    switch(AEK_POW_BMS63CHAIN_faultInjectMode)
+    {
+        case AEK_POW_BMS63CHAIN_FAULT_INJECT_SPI_FRAME: return "SPI_FRAME";
+        case AEK_POW_BMS63CHAIN_FAULT_INJECT_SPI_RX: return "SPI_RX";
+        case AEK_POW_BMS63CHAIN_FAULT_INJECT_VREF: return "VREF";
+        case AEK_POW_BMS63CHAIN_FAULT_INJECT_CELL_VOLT: return "CELL_VOLT";
+        case AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE:
+        default: return "NONE";
+    }
+}
+
+static uint8_t AEK_POW_BMS63CHAIN_app_balancingSafetyOk(void)
+{
+    return (AEK_POW_BMS63CHAIN_balSafetyState ==
+            AEK_POW_BMS63CHAIN_BAL_SAFETY_OK) ? 1U : 0U;
+}
+
+static void AEK_POW_BMS63CHAIN_app_saveLastGoodObservation(AEK_POW_BMS63CHAIN_nodeData_t *nodeData)
+{
+    uint8_t i;
+
+    if(nodeData == NULL){
+        return;
+    }
+
+    AEK_POW_BMS63CHAIN_lastGoodObsMs = osalThreadGetMilliseconds();
+    AEK_POW_BMS63CHAIN_lastGoodVref = nodeData->AEK_POW_BMS63CHAIN_Vref;
+    AEK_POW_BMS63CHAIN_lastGoodCurrent = nodeData->AEK_POW_BMS63CHAIN_Pack_Current;
+
+    for(i = 0U; i < 14U; i++){
+        AEK_POW_BMS63CHAIN_lastGoodCellV[i] =
+            nodeData->AEK_POW_BMS63CHAIN_Pack_CellVoltage[i];
+    }
+}
+
+static AEK_POW_BMS63CHAIN_balSafetyState_t
+AEK_POW_BMS63CHAIN_app_evaluateCommAndMeasurements(AEK_POW_BMS63CHAIN_nodeData_t *nodeData)
+{
+    uint8_t i;
+    uint16_t cellMask;
+    float vcell;
+    uint32_t nowMs;
+
+    uint8_t chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
+    uint8_t devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;
 
     AEK_POW_BMS63CHAIN_fastDiag_t *diag =
         &AEK_POW_BMS63CHAIN_app_dataChain[chainidx]
@@ -271,41 +507,96 @@ static uint8_t AEK_POW_BMS63CHAIN_app_balancingSafetyOk(void)
         &AEK_POW_BMS63CHAIN_app_dataChain[chainidx]
             .AEK_POW_BMS63CHAIN_fastMeas[devidx - 1U];
 
-    /* VREF sanity. Normal in this bench setup is around 4.97 V. */
-    if((nodeData->AEK_POW_BMS63CHAIN_Vref < 4.5F) ||
-       (nodeData->AEK_POW_BMS63CHAIN_Vref > 5.2F)){
-        return 0U;
+    int txrx = (int)AEK_POW_BMS63CHAIN_chain[chainidx]
+        .AEK_POW_BMS63CHAIN_spi_chainConf
+        .AEK_POW_BMS63CHAIN_spi_txRxSts;
+
+    int frame = (int)AEK_POW_BMS63CHAIN_chain[chainidx]
+        .AEK_POW_BMS63CHAIN_spi_chainConf
+        .AEK_POW_BMS63CHAIN_spi_frameErrSts;
+
+    int gsw = (int)AEK_POW_BMS63CHAIN_chain[chainidx]
+        .AEK_POW_BMS63CHAIN_spi_chainConf
+        .AEK_POW_BMS63CHAIN_spi_GSWErrSts;
+
+    nowMs = osalThreadGetMilliseconds();
+
+    /*
+     * Fault-injection commands are handled as one-shot simulated blocks in
+     * the command parser. They are intentionally not evaluated here because
+     * continuously returning an injected fault from this fast watchdog path
+     * makes the serial interface sluggish and can look like the board is stuck.
+     */
+
+    /*
+     * RX/TX waiting can be normal for a short instant during an SPI/isoSPI
+     * transaction. Do NOT block AUTO immediately while the transaction is
+     * still inside the allowed timeout window. This was the main reason AUTO
+     * could look armed but never start: the watchdog was treating a temporary
+     * TX/RX_WAITING state as a real failure.
+     */
+    if(txrx != AEK_POW_BMS63CHAIN_APP_SPI_RX_COMPLETED_VALUE){
+
+        if(AEK_POW_BMS63CHAIN_spiRxWaitStartMs == 0U){
+            AEK_POW_BMS63CHAIN_spiRxWaitStartMs = nowMs;
+        }
+
+        if((uint32_t)(nowMs - AEK_POW_BMS63CHAIN_spiRxWaitStartMs) >=
+           AEK_POW_BMS63CHAIN_SPI_RX_WAIT_TIMEOUT_MS){
+            return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_RX;
+        }
+
+        /* Transient waiting state: keep last known-safe state, do not block. */
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
+    }
+    else{
+        AEK_POW_BMS63CHAIN_spiRxWaitStartMs = 0U;
     }
 
-    if((meas->AEK_POW_BMS63CHAIN_VTrefMeas < 4.5F) ||
-       (meas->AEK_POW_BMS63CHAIN_VTrefMeas > 5.2F)){
-        return 0U;
+    if(frame != AEK_POW_BMS63CHAIN_APP_SPI_FRAME_NO_ERROR_VALUE){
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_FRAME;
     }
 
-    /* Trim / EEPROM / RAM integrity. */
-    if(diag->AEK_POW_BMS63CHAIN_eepromCrcErrCalOff != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_eepromCrcErrCalRam != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_eepromCrcErrSect0 != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_RamCrcErr != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_trimmCalOK == 0U){ return 0U; }
-    if(meas->AEK_POW_BMS63CHAIN_trimmCalOK == 0U){ return 0U; }
+    if(gsw != AEK_POW_BMS63CHAIN_APP_SPI_GSW_NO_ERROR_VALUE){
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_GSW;
+    }
 
-    /* Critical hardware/reference faults. Do not block on wuIsoLine. */
-    if(diag->AEK_POW_BMS63CHAIN_OTchip != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_lossAgnd != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_lossDgnd != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_lossCgnd != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_lossGndRef != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_vtRefUV != 0U){ return 0U; }
-    if(diag->AEK_POW_BMS63CHAIN_vtRefOV != 0U){ return 0U; }
+    if(nodeData == NULL){
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CELL_VOLT;
+    }
 
-    /* Balance only near rest. */
+    if((nodeData->AEK_POW_BMS63CHAIN_Vref < AEK_POW_BMS63CHAIN_SAFE_VREF_MIN) ||
+       (nodeData->AEK_POW_BMS63CHAIN_Vref > AEK_POW_BMS63CHAIN_SAFE_VREF_MAX)){
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF;
+    }
+
+    if((meas->AEK_POW_BMS63CHAIN_VTrefMeas < AEK_POW_BMS63CHAIN_SAFE_VREF_MIN) ||
+       (meas->AEK_POW_BMS63CHAIN_VTrefMeas > AEK_POW_BMS63CHAIN_SAFE_VREF_MAX)){
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF;
+    }
+
+    if(diag->AEK_POW_BMS63CHAIN_eepromCrcErrCalOff != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM; }
+    if(diag->AEK_POW_BMS63CHAIN_eepromCrcErrCalRam != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM; }
+    if(diag->AEK_POW_BMS63CHAIN_eepromCrcErrSect0 != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM; }
+    if(diag->AEK_POW_BMS63CHAIN_RamCrcErr != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM; }
+
+    if(diag->AEK_POW_BMS63CHAIN_trimmCalOK == 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM; }
+    if(meas->AEK_POW_BMS63CHAIN_trimmCalOK == 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM; }
+
+    if(diag->AEK_POW_BMS63CHAIN_OTchip != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT; }
+    if(diag->AEK_POW_BMS63CHAIN_lossAgnd != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT; }
+    if(diag->AEK_POW_BMS63CHAIN_lossDgnd != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT; }
+    if(diag->AEK_POW_BMS63CHAIN_lossCgnd != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT; }
+    if(diag->AEK_POW_BMS63CHAIN_lossGndRef != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT; }
+
+    if(diag->AEK_POW_BMS63CHAIN_vtRefUV != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF; }
+    if(diag->AEK_POW_BMS63CHAIN_vtRefOV != 0U){ return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF; }
+
     if(AEK_POW_BMS63CHAIN_app_absf(nodeData->AEK_POW_BMS63CHAIN_Pack_Current) >
        AEK_POW_BMS63CHAIN_BAL_AUTO_MAX_CURRENT_A){
-        return 0U;
+        return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CURRENT;
     }
 
-    /* Active-cell voltage sanity. This blocks impossible 5.5 V measurement states. */
     for(i = 0U; i < 14U; i++){
         cellMask = (uint16_t)(1U << i);
 
@@ -314,51 +605,146 @@ static uint8_t AEK_POW_BMS63CHAIN_app_balancingSafetyOk(void)
 
             vcell = nodeData->AEK_POW_BMS63CHAIN_Pack_CellVoltage[i];
 
-            if((vcell < AEK_POW_BMS63CHAIN_BAL_AUTO_MIN_CELL_VOLTAGE) ||
-               (vcell > AEK_POW_BMS63CHAIN_BAL_AUTO_MAX_CELL_VOLTAGE)){
-                return 0U;
+            if((vcell < AEK_POW_BMS63CHAIN_SAFE_CELL_MIN_PLAUSIBLE) ||
+               (vcell > AEK_POW_BMS63CHAIN_SAFE_CELL_MAX_PLAUSIBLE)){
+                return AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CELL_VOLT;
             }
         }
     }
 
-    return 1U;
+    return AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
 }
 
-static const char *AEK_POW_BMS63CHAIN_app_autoStateText(void)
+static void AEK_POW_BMS63CHAIN_app_enterSafetyBlocked(
+    AEK_POW_BMS63CHAIN_balSafetyState_t state
+)
 {
-    if(AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_OFF){
-        return "OFF";
+    /*
+     * Avoid re-entering the same blocked state on every fast control-loop pass.
+     * The first entry performs the important physical BAL-OFF action; repeated
+     * entries are unnecessary and make the serial interface feel slow.
+     */
+    if(AEK_POW_BMS63CHAIN_balSafetyState == state){
+        AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+        AEK_POW_BMS63CHAIN_balAutoActive = 0U;
+        AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
+        AEK_POW_BMS63CHAIN_balManualMask = 0U;
+        AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+        return;
     }
 
-    if(AEK_POW_BMS63CHAIN_app_balancingSafetyOk() == 0U){
-        return "BLOCKED_SAFETY";
+    if(AEK_POW_BMS63CHAIN_balSafetyState == AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+        AEK_POW_BMS63CHAIN_commRecoveryCount++;
     }
 
-    if(AEK_POW_BMS63CHAIN_balAutoActive != 0U){
-        return "BALANCING";
+    AEK_POW_BMS63CHAIN_balSafetyState = state;
+    AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+
+    AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+    AEK_POW_BMS63CHAIN_balAutoActive = 0U;
+    AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
+    AEK_POW_BMS63CHAIN_balAutoSelectedCellIdx =
+        AEK_POW_BMS63CHAIN_BAL_AUTO_INVALID_CELL;
+
+    AEK_POW_BMS63CHAIN_balManualMask = 0U;
+    AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+
+    /*
+     * Do not call AEK_POW_BMS63CHAIN_app_forceBalancingOffOnChip() here.
+     * This function can be entered from the serial command path and from the
+     * watchdog path. If SPI/isoSPI is already in TX/RX_WAITING, synchronous
+     * stop-balancing SPI calls can block the command interface.
+     *
+     * The normal app_step() loop sees balClearRequest and clears the pack
+     * balancing state. Hardware stop commands must be attempted only from the
+     * controlled step context, not directly from the parser.
+     */
+}
+
+static void AEK_POW_BMS63CHAIN_app_updateRecoveryWatchdog(
+    AEK_POW_BMS63CHAIN_nodeData_t *nodeData
+)
+{
+    uint32_t nowMs;
+    AEK_POW_BMS63CHAIN_balSafetyState_t evalState;
+
+    nowMs = osalThreadGetMilliseconds();
+
+    if((uint32_t)(nowMs - AEK_POW_BMS63CHAIN_lastRecoveryWatchdogMs) <
+       AEK_POW_BMS63CHAIN_RECOVERY_WATCHDOG_PERIOD_MS){
+        return;
     }
 
-    if(AEK_POW_BMS63CHAIN_balAutoCooldown != 0U){
-        return "COOLDOWN";
+    AEK_POW_BMS63CHAIN_lastRecoveryWatchdogMs = nowMs;
+
+    evalState = AEK_POW_BMS63CHAIN_app_evaluateCommAndMeasurements(nodeData);
+
+    if(evalState == AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+
+        AEK_POW_BMS63CHAIN_commBadCount = 0U;
+
+        if(AEK_POW_BMS63CHAIN_commGoodCount < 255U){
+            AEK_POW_BMS63CHAIN_commGoodCount++;
+        }
+
+        AEK_POW_BMS63CHAIN_app_saveLastGoodObservation(nodeData);
+
+        if((AEK_POW_BMS63CHAIN_balSafetyState != AEK_POW_BMS63CHAIN_BAL_SAFETY_OK) &&
+           (AEK_POW_BMS63CHAIN_balAutoRecoverEnabled != 0U) &&
+           (AEK_POW_BMS63CHAIN_commGoodCount >= AEK_POW_BMS63CHAIN_COMM_GOOD_RESUME_LIMIT) &&
+           ((uint32_t)(nowMs - AEK_POW_BMS63CHAIN_commBlockedSinceMs) >=
+                AEK_POW_BMS63CHAIN_RECOVERY_SETTLE_MS)){
+
+            AEK_POW_BMS63CHAIN_balSafetyState =
+                AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
+
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+
+            AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
+        }
+
+        return;
     }
 
-    if((AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_AUTO) &&
-       (AEK_POW_BMS63CHAIN_balAutoLastDeltaV <= AEK_POW_BMS63CHAIN_BAL_AUTO_STOP_DELTA_V) &&
-       (AEK_POW_BMS63CHAIN_balAutoLastDeltaV > 0.0F)){
-        return "STOPPED_DELTA_SMALL";
+    AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+
+    if(AEK_POW_BMS63CHAIN_commBadCount < 255U){
+        AEK_POW_BMS63CHAIN_commBadCount++;
     }
 
-    if((AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_AUTO) &&
-       (AEK_POW_BMS63CHAIN_balAutoLastDeltaV < AEK_POW_BMS63CHAIN_BAL_AUTO_START_DELTA_V)){
-        return "WAIT_DELTA";
+    if((evalState == AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF) ||
+       (evalState == AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CELL_VOLT) ||
+       (evalState == AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_TRIM) ||
+       (evalState == AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CRITICAL_FAULT) ||
+       (evalState == AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CURRENT)){
+
+        AEK_POW_BMS63CHAIN_app_enterSafetyBlocked(evalState);
+        return;
     }
 
-    return "READY";
+    if(AEK_POW_BMS63CHAIN_commBadCount >= AEK_POW_BMS63CHAIN_COMM_BAD_LIMIT){
+
+        if(AEK_POW_BMS63CHAIN_commRecoveryCount >= AEK_POW_BMS63CHAIN_MAX_AUTO_RECOVERIES){
+            AEK_POW_BMS63CHAIN_app_enterSafetyBlocked(
+                AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_RECOVERY_LOCKOUT
+            );
+        }
+        else{
+            AEK_POW_BMS63CHAIN_app_enterSafetyBlocked(evalState);
+        }
+    }
+
+    if(AEK_POW_BMS63CHAIN_balSafetyState != AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+        AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+        AEK_POW_BMS63CHAIN_balManualMask = 0U;
+        AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+    }
 }
 
 static void AEK_POW_BMS63CHAIN_app_sendBalancingSafetyReport(void)
 {
-    char message[128];
+    static char message[128];
 
     AEK_POW_BMS63CHAIN_nodeData_t *nodeData =
         &AEK_POW_BMS63CHAIN_app_dataChain[AEK_POW_BMS63CHAIN_CHAIN0]
@@ -384,7 +770,7 @@ static void AEK_POW_BMS63CHAIN_app_sendBalancingSummary(void)
      * On embedded targets, long floating-point sprintf() calls can consume
      * stack and make debugging harder. These shorter lines are safer.
      */
-    char message[192];
+    static char message[192];
 
     uint8_t i;
     uint8_t minCellIdx = AEK_POW_BMS63CHAIN_BAL_AUTO_INVALID_CELL;
@@ -515,7 +901,7 @@ static void AEK_POW_BMS63CHAIN_app_sendBalancingSummary(void)
 
 static void AEK_POW_BMS63CHAIN_app_sendBalancingEnergyReport(void)
 {
-    char message[192];
+    static char message[192];
     uint8_t i;
     float socRemovedPct;
 
@@ -638,6 +1024,31 @@ static const char *AEK_POW_BMS63CHAIN_app_balModeText(void){
 	return "OFF";
 }
 
+static const char *AEK_POW_BMS63CHAIN_app_autoStateText(void)
+{
+    if(AEK_POW_BMS63CHAIN_balSafetyState != AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+        return AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState);
+    }
+
+    if(AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_OFF){
+        return "OFF";
+    }
+
+    if(AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_MANUAL){
+        return "MANUAL";
+    }
+
+    if(AEK_POW_BMS63CHAIN_balAutoActive != 0U){
+        return "BALANCING";
+    }
+
+    if(AEK_POW_BMS63CHAIN_balAutoCooldown != 0U){
+        return "COOLDOWN_TIMER";
+    }
+
+    return "AUTO_READY";
+}
+
 static const char *AEK_POW_BMS63CHAIN_app_balStrategyText(void)
 {
     if(AEK_POW_BMS63CHAIN_balStrategyMode == AEK_POW_BMS63CHAIN_BAL_STRATEGY_MULTI2){
@@ -649,7 +1060,7 @@ static const char *AEK_POW_BMS63CHAIN_app_balStrategyText(void)
 
 static void AEK_POW_BMS63CHAIN_app_sendBalancingStrategyReport(void)
 {
-    char message[128];
+    static char message[128];
 
     sprintf(message,
             "OK;BAL_STRATEGY;MODE;%s;MAX_CELLS;%u;PWR_CAP_W;%.2f;TIE_MV;%.1f;\r\n",
@@ -664,7 +1075,7 @@ static void AEK_POW_BMS63CHAIN_app_sendBalancingStrategyReport(void)
 
 static void AEK_POW_BMS63CHAIN_app_sendBalStatus(char *prefix)
 {
-    char message[160];
+    static char message[256];
     uint16_t effectiveMask = 0U;
     uint16_t actualMask = 0U;
 
@@ -672,10 +1083,13 @@ static void AEK_POW_BMS63CHAIN_app_sendBalStatus(char *prefix)
 
     if(AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_AUTO){
         /*
-         * In AUTO mode, the most useful mask is the actual applied mask.
-         * balAutoMask may be cleared/reset during pulse/cooldown timing.
+         * Report the requested AUTO mask when it exists; otherwise report the
+         * actual mask. This makes BAL AUTO immediately understandable: just
+         * after arming AUTO, ACTUAL may still be zero until the next control
+         * step writes the command to the L9963E.
          */
-        effectiveMask = actualMask;
+        effectiveMask = (AEK_POW_BMS63CHAIN_balAutoMask != 0U) ?
+            AEK_POW_BMS63CHAIN_balAutoMask : actualMask;
     }
     else if(AEK_POW_BMS63CHAIN_balCtrlMode == AEK_POW_BMS63CHAIN_BAL_CTRL_MANUAL){
         effectiveMask = AEK_POW_BMS63CHAIN_balManualMask;
@@ -687,8 +1101,9 @@ static void AEK_POW_BMS63CHAIN_app_sendBalStatus(char *prefix)
     effectiveMask = AEK_POW_BMS63CHAIN_app_sanitizeBalMask(effectiveMask);
 
     sprintf(message,
-            "%s;BAL;MODE;%s;STRATEGY;%s;MASK;0x%04X;MAN;0x%04X;AUTO_REQ;0x%04X;ACTUAL;0x%04X;ACTIVE;%u;COOLDOWN;%u;\r\n",
+            "%s;BAL;STATE;%s;MODE;%s;STRATEGY;%s;MASK;0x%04X;MAN;0x%04X;AUTO_REQ;0x%04X;ACTUAL;0x%04X;ACTIVE;%u;COOLDOWN;%u;BAD;%u;GOOD;%u;RECOV;%lu;\r\n",
             prefix,
+            AEK_POW_BMS63CHAIN_app_safetyStateText(AEK_POW_BMS63CHAIN_balSafetyState),
             AEK_POW_BMS63CHAIN_app_balModeText(),
             AEK_POW_BMS63CHAIN_app_balStrategyText(),
             (unsigned int)effectiveMask,
@@ -696,14 +1111,17 @@ static void AEK_POW_BMS63CHAIN_app_sendBalStatus(char *prefix)
             (unsigned int)AEK_POW_BMS63CHAIN_balAutoMask,
             (unsigned int)actualMask,
             (unsigned int)AEK_POW_BMS63CHAIN_balAutoActive,
-            (unsigned int)AEK_POW_BMS63CHAIN_balAutoCooldown);
+            (unsigned int)AEK_POW_BMS63CHAIN_balAutoCooldown,
+            (unsigned int)AEK_POW_BMS63CHAIN_commBadCount,
+            (unsigned int)AEK_POW_BMS63CHAIN_commGoodCount,
+            (unsigned long)AEK_POW_BMS63CHAIN_commRecoveryCount);
 
     sendMessage(message);
 }
 
 static void AEK_POW_BMS63CHAIN_app_printFaultFlag(uint16_t value, char *name, uint16_t *activeCount)
 {
-    char message[96];
+    static char message[96];
 
     if(value != 0U){
         sprintf(message, "FAULT;ACTIVE;%s;%u;\r\n", name, (unsigned int)value);
@@ -717,7 +1135,7 @@ static void AEK_POW_BMS63CHAIN_app_printFaultFlag(uint16_t value, char *name, ui
 
 static void AEK_POW_BMS63CHAIN_app_sendAutoDebug(void)
 {
-    char message[192];
+    static char message[192];
 
     uint8_t chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
     uint8_t devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;
@@ -784,7 +1202,7 @@ static void AEK_POW_BMS63CHAIN_app_sendAutoDebug(void)
 
 static void AEK_POW_BMS63CHAIN_app_sendFaultReport(void)
 {
-    char message[128];
+    static char message[128];
 
     uint8_t chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
     uint8_t devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;
@@ -1005,7 +1423,7 @@ static void AEK_POW_BMS63CHAIN_app_sendFaultReport(void)
 
 static void AEK_POW_BMS63CHAIN_app_sendTrimReport(void)
 {
-    char message[160];
+    static char message[160];
 
     uint8_t chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
     uint8_t devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;
@@ -1133,7 +1551,7 @@ static void AEK_POW_BMS63CHAIN_app_processSerialCommand(char *command){
     else if((strcmp(command, "BAL SAFETY?") == 0) ||
             (strcmp(command, "BSAFE?") == 0)){
 
-        AEK_POW_BMS63CHAIN_app_sendBalancingSafetyReport();
+        AEK_POW_BMS63CHAIN_app_sendBalTest();
     }
     /* Shortcut: balance CELL13 only */
     else if((strcmp(command, "B13 ON") == 0) ||
@@ -1196,17 +1614,53 @@ static void AEK_POW_BMS63CHAIN_app_processSerialCommand(char *command){
 
     else if(strcmp(command, "BAL AUTO") == 0)
     {
+        static char message[192];
+        AEK_POW_BMS63CHAIN_balSafetyState_t evalState;
+        AEK_POW_BMS63CHAIN_nodeData_t *nodeData =
+            &AEK_POW_BMS63CHAIN_app_dataChain[AEK_POW_BMS63CHAIN_CHAIN0]
+                .AEK_POW_BMS63CHAIN_nodeData[AEK_POW_BMS63CHAIN_NODE_DEV1 - 1U];
+
         /*
-        * AUTO mode:
-        * - manual mask cleared
-        * - auto state reset
-        * - actual auto mask is computed later in applyBalancingControl()
-        */
+         * Do not arm AUTO if the current real measurement/communication state
+         * is bad. If it is healthy, also clear old software lockout counters
+         * so a previous transient failure does not keep AUTO permanently off.
+         */
+        evalState = AEK_POW_BMS63CHAIN_app_evaluateCommAndMeasurements(nodeData);
+
+        if(evalState != AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+            AEK_POW_BMS63CHAIN_balCtrlMode = AEK_POW_BMS63CHAIN_BAL_CTRL_OFF;
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
+            AEK_POW_BMS63CHAIN_balSafetyState = evalState;
+
+            sprintf(message,
+                    "ERR;BAL;AUTO_BLOCKED;STATE;%s;VREF;%.4f;CURR;%.4f;\r\n",
+                    AEK_POW_BMS63CHAIN_app_safetyStateText(evalState),
+                    nodeData->AEK_POW_BMS63CHAIN_Vref,
+                    nodeData->AEK_POW_BMS63CHAIN_Pack_Current);
+            sendMessage(message);
+            return;
+        }
+
+        AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+        AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
+        AEK_POW_BMS63CHAIN_commBadCount = 0U;
+        AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+        AEK_POW_BMS63CHAIN_commRecoveryCount = 0U;
+        AEK_POW_BMS63CHAIN_spiRxWaitStartMs = 0U;
+        AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+
         AEK_POW_BMS63CHAIN_balManualMask = 0U;
         AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
-
         AEK_POW_BMS63CHAIN_balCtrlMode = AEK_POW_BMS63CHAIN_BAL_CTRL_AUTO;
         AEK_POW_BMS63CHAIN_balClearRequest = 0U;
+
+        /*
+         * Compute the first request immediately for a useful BAL status line.
+         * The real L9963E command is still applied safely by app_step().
+         */
+        AEK_POW_BMS63CHAIN_balAutoMask =
+            AEK_POW_BMS63CHAIN_app_computeAutoBalancingMask(nodeData);
 
         AEK_POW_BMS63CHAIN_app_sendBalStatus("OK");
     }
@@ -1216,7 +1670,7 @@ static void AEK_POW_BMS63CHAIN_app_processSerialCommand(char *command){
         uint32_t requestedMask32;
         uint16_t requestedMask;
         uint16_t safeMask;
-        char message[96];
+        static char message[96];
 
         requestedMask32 = strtoul(&command[8], NULL, 0);
         requestedMask = (uint16_t)(requestedMask32 & AEK_POW_BMS63CHAIN_ALL_CELL_MASK);
@@ -1351,6 +1805,170 @@ static void AEK_POW_BMS63CHAIN_app_processSerialCommand(char *command){
         {
             AEK_POW_BMS63CHAIN_app_sendBalancingSummary();
         }
+
+    else if((strcmp(command, "BAL TEST?") == 0) ||
+            (strcmp(command, "BAL TEST") == 0) ||
+            (strcmp(command, "TEST?") == 0))
+        {
+            AEK_POW_BMS63CHAIN_app_sendBalTest();
+        }
+
+    else if((strcmp(command, "BAL PHASE?") == 0) ||
+            (strcmp(command, "BAL PHASE") == 0) ||
+            (strcmp(command, "PHASE?") == 0))
+        {
+            AEK_POW_BMS63CHAIN_app_sendBalPhase();
+        }
+
+    else if((strcmp(command, "BAL AUTORECOVER ON") == 0) ||
+            (strcmp(command, "AUTORECOVER ON") == 0))
+        {
+            AEK_POW_BMS63CHAIN_balAutoRecoverEnabled = 1U;
+            sendMessage("OK;BAL_AUTORECOVER;ON;\r\n");
+        }
+
+    else if((strcmp(command, "BAL AUTORECOVER OFF") == 0) ||
+            (strcmp(command, "AUTORECOVER OFF") == 0))
+        {
+            AEK_POW_BMS63CHAIN_balAutoRecoverEnabled = 0U;
+            sendMessage("OK;BAL_AUTORECOVER;OFF;\r\n");
+        }
+
+    else if((strcmp(command, "BAL RECOVER") == 0) ||
+            (strcmp(command, "RECOVER") == 0) ||
+            (strcmp(command, "BAL RESET_STATE") == 0))
+        {
+            static char message[192];
+            AEK_POW_BMS63CHAIN_balSafetyState_t evalState;
+            AEK_POW_BMS63CHAIN_nodeData_t *nodeData =
+                &AEK_POW_BMS63CHAIN_app_dataChain[AEK_POW_BMS63CHAIN_CHAIN0]
+                    .AEK_POW_BMS63CHAIN_nodeData[AEK_POW_BMS63CHAIN_NODE_DEV1 - 1U];
+
+            AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+            evalState = AEK_POW_BMS63CHAIN_app_evaluateCommAndMeasurements(nodeData);
+
+            if(evalState != AEK_POW_BMS63CHAIN_BAL_SAFETY_OK){
+                AEK_POW_BMS63CHAIN_balSafetyState = evalState;
+                AEK_POW_BMS63CHAIN_balCtrlMode = AEK_POW_BMS63CHAIN_BAL_CTRL_OFF;
+                AEK_POW_BMS63CHAIN_balManualMask = 0U;
+                AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
+
+                sprintf(message,
+                        "ERR;BAL_RECOVER;STILL_BAD;STATE;%s;VREF;%.4f;CURR;%.4f;\r\n",
+                        AEK_POW_BMS63CHAIN_app_safetyStateText(evalState),
+                        nodeData->AEK_POW_BMS63CHAIN_Vref,
+                        nodeData->AEK_POW_BMS63CHAIN_Pack_Current);
+                sendMessage(message);
+                return;
+            }
+
+            AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+            AEK_POW_BMS63CHAIN_commRecoveryCount = 0U;
+            AEK_POW_BMS63CHAIN_spiRxWaitStartMs = 0U;
+            AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+
+            AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_balCtrlMode = AEK_POW_BMS63CHAIN_BAL_CTRL_OFF;
+            AEK_POW_BMS63CHAIN_balClearRequest = 0U;
+
+            sendMessage("OK;BAL_RECOVER;STATE;OK;SOFT_CLEAR;1;RECOV;0;\r\n");
+        }
+
+    else if(strcmp(command, "BAL INJECT CLEAR") == 0)
+        {
+            AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+            AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_OK;
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+            AEK_POW_BMS63CHAIN_commRecoveryCount = 0U;
+            AEK_POW_BMS63CHAIN_spiRxWaitStartMs = 0U;
+            AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+            AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_balCtrlMode = AEK_POW_BMS63CHAIN_BAL_CTRL_OFF;
+            AEK_POW_BMS63CHAIN_balClearRequest = 0U;
+            sendMessage("OK;BAL_INJECT;CLEAR;STATE;OK;SOFT_CLEAR;1;RECOV;0;\r\n");
+        }
+
+    else if(strcmp(command, "BAL INJECT FRAME") == 0)
+        {
+            /*
+             * Software-only injection test.
+             * Do NOT call forceBalancingOffOnChip() from the parser.
+             */
+            AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+            AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_FRAME;
+            AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+            AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+            AEK_POW_BMS63CHAIN_balAutoActive = 0U;
+            AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+            sendMessage("OK;BAL_INJECT;SPI_FRAME;STATE;BLOCKED_SPI_FRAME;SOFT_BLOCK;1;\r\n");
+        }
+
+    else if(strcmp(command, "BAL INJECT RX") == 0)
+        {
+            /*
+             * Software-only injection test.
+             * Do NOT call forceBalancingOffOnChip() from the parser.
+             */
+            AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+            AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_SPI_RX;
+            AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+            AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+            AEK_POW_BMS63CHAIN_balAutoActive = 0U;
+            AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+            sendMessage("OK;BAL_INJECT;SPI_RX;STATE;BLOCKED_SPI_RX;SOFT_BLOCK;1;\r\n");
+        }
+
+    else if(strcmp(command, "BAL INJECT VREF") == 0)
+        {
+            /*
+             * Software-only injection test.
+             * Do NOT call forceBalancingOffOnChip() from the parser.
+             */
+            AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+            AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_VREF;
+            AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+            AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+            AEK_POW_BMS63CHAIN_balAutoActive = 0U;
+            AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+            sendMessage("OK;BAL_INJECT;VREF;STATE;BLOCKED_VREF;SOFT_BLOCK;1;\r\n");
+        }
+
+    else if(strcmp(command, "BAL INJECT CELL") == 0)
+        {
+            /*
+             * Software-only injection test.
+             * Do NOT call forceBalancingOffOnChip() from the parser.
+             */
+            AEK_POW_BMS63CHAIN_faultInjectMode = AEK_POW_BMS63CHAIN_FAULT_INJECT_NONE;
+            AEK_POW_BMS63CHAIN_balSafetyState = AEK_POW_BMS63CHAIN_BAL_SAFETY_BLOCKED_CELL_VOLT;
+            AEK_POW_BMS63CHAIN_commBlockedSinceMs = osalThreadGetMilliseconds();
+            AEK_POW_BMS63CHAIN_commBadCount = 0U;
+            AEK_POW_BMS63CHAIN_commGoodCount = 0U;
+            AEK_POW_BMS63CHAIN_balAutoMask = 0U;
+            AEK_POW_BMS63CHAIN_balAutoActive = 0U;
+            AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
+            AEK_POW_BMS63CHAIN_balManualMask = 0U;
+            AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
+            sendMessage("OK;BAL_INJECT;CELL_VOLT;STATE;BLOCKED_CELL_VOLT;SOFT_BLOCK;1;\r\n");
+        }
+
     else{
             sendMessage("ERR;UNKNOWN_CMD;\r\n");
         }
@@ -1626,6 +2244,17 @@ static uint16_t AEK_POW_BMS63CHAIN_app_computeAutoBalancingMask(AEK_POW_BMS63CHA
     }
 
     /*
+     * Recovery/safety watchdog:
+     * communication invalid or impossible measurement -> BAL OFF and no AUTO mask.
+     */
+    AEK_POW_BMS63CHAIN_app_updateRecoveryWatchdog(nodeData);
+
+    if(AEK_POW_BMS63CHAIN_app_balancingSafetyOk() == 0U){
+        AEK_POW_BMS63CHAIN_app_resetAutoBalancing();
+        return 0U;
+    }
+
+    /*
      * 1) Measurement sanity: VREF must be realistic.
      * If VREF is wrong, cell measurements cannot be trusted.
      */
@@ -1892,6 +2521,12 @@ static void AEK_POW_BMS63CHAIN_app_applyBalancingControl(void)
                     .AEK_POW_BMS63CHAIN_nodeData[AEK_POW_BMS63CHAIN_devidx - 1U];
 
             /*
+             * Always update the recovery watchdog during the control loop.
+             * This protects AUTO and MANUAL balancing even when no serial command is sent.
+             */
+            AEK_POW_BMS63CHAIN_app_updateRecoveryWatchdog(AEK_POW_BMS63CHAIN_nodeData);
+
+            /*
              * Final hard safety gate.
              * If measurements or critical diagnostics are not trustworthy,
              * force all balancing commands OFF before they reach the BMS.
@@ -1901,7 +2536,7 @@ static void AEK_POW_BMS63CHAIN_app_applyBalancingControl(void)
 
                 AEK_POW_BMS63CHAIN_balManualMask = 0U;
                 AEK_POW_BMS63CHAIN_balAutoMask = 0U;
-                AEK_POW_BMS63CHAIN_balClearRequest = 1U;
+                AEK_POW_BMS63CHAIN_balClearRequest = 0U;  /* software-only: do not trigger 14x disableBalCell SPI writes here */
                 AEK_POW_BMS63CHAIN_balAutoActive = 0U;
                 AEK_POW_BMS63CHAIN_balAutoCooldown = 0U;
 
@@ -2094,7 +2729,11 @@ void AEK_POW_BMS63CHAIN_app_init(void){
   for(AEK_POW_BMS63CHAIN_chainidx = AEK_POW_BMS63CHAIN_CHAIN0; AEK_POW_BMS63CHAIN_chainidx<AEK_POW_BMS63CHAIN_chain_geNum(); AEK_POW_BMS63CHAIN_chainidx++){
 	  AEK_POWBMS63CHAIN_chain_init(AEK_POW_BMS63CHAIN_chainidx);
 	  for(AEK_POW_BMS63CHAIN_devidx = AEK_POW_BMS63CHAIN_NODE_DEV1; AEK_POW_BMS63CHAIN_devidx<=AEK_POW_BMS63CHAIN_chain_getDevNum(AEK_POW_BMS63CHAIN_chainidx); AEK_POW_BMS63CHAIN_devidx++){
-		  AEK_POW_BMS63CHAIN_node_cyclicMeasurementConversionRequest(AEK_POW_BMS63CHAIN_chainidx, AEK_POW_BMS63CHAIN_devidx, AEK_POW_BMS63CHAIN_TCYCLE_TRIGGERED);
+		AEK_POW_BMS63CHAIN_node_setSilentBalancingMode(
+                      AEK_POW_BMS63CHAIN_chainidx,
+                      AEK_POW_BMS63CHAIN_devidx,
+                      AEK_POW_BMS63CHAIN_ENABLE);
+        AEK_POW_BMS63CHAIN_node_cyclicMeasurementConversionRequest(AEK_POW_BMS63CHAIN_chainidx, AEK_POW_BMS63CHAIN_devidx, AEK_POW_BMS63CHAIN_TCYCLE_TRIGGERED);
 	  }
   }
   AEK_POW_BMS63CHAIN_app_initModels();
@@ -2155,6 +2794,16 @@ void AEK_POW_BMS63CHAIN_app_step(uint16_t AEK_POW_BMS63CHAIN_app_timeStamp)
                   AEK_POW_BMS63CHAIN_node_getFastDiag(
                       AEK_POW_BMS63CHAIN_chainidx,
                       AEK_POW_BMS63CHAIN_devidx);
+          /* FREEZE FIX: L9963E is TCYCLE_TRIGGERED (one-shot). Re-arm every cycle when
+          * idle so conversions never stop. (Stock code only re-armed under ovrLatch/
+          * curSense, so normally nothing restarted them -> the 16 s freeze.) */
+          if(AEK_POW_BMS63CHAIN_node_getVoltageConvRoutineSts(
+              AEK_POW_BMS63CHAIN_chainidx, AEK_POW_BMS63CHAIN_devidx)
+              == AEK_POW_BMS63CHAIN_NODE_IDLE){
+              AEK_POW_BMS63CHAIN_node_cyclicMeasurementConversionRequest(
+                  AEK_POW_BMS63CHAIN_chainidx, AEK_POW_BMS63CHAIN_devidx,
+                  AEK_POW_BMS63CHAIN_TCYCLE_TRIGGERED);
+          }
 
           /*
            * If the diagnostic says there is an over-latch/current-sense condition,
@@ -2195,6 +2844,71 @@ void AEK_POW_BMS63CHAIN_app_step(uint16_t AEK_POW_BMS63CHAIN_app_timeStamp)
    */
   AEK_POW_BMS63CHAIN_app_parserData();
 
+
+  /* --- L9963E conversion-freeze self-recovery (no 12 V power-cycle) --- */
+  {
+      /* up to 16 nodes; 15 stale cycles (~15 s at 1 Hz) before a reset */
+      static uint32_t convStaleCnt[16] = {0U};
+      static uint32_t lastVcellSig[16] = {0U};
+      static uint32_t convRecoveryCount = 0U;
+
+      uint8_t  rc_chainidx;
+      uint8_t  rc_devidx;
+      uint8_t  rc_cellidx;
+      uint32_t rc_sig;
+
+      for(rc_chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
+          rc_chainidx < AEK_POW_BMS63CHAIN_chain_geNum();
+          rc_chainidx++){
+
+          for(rc_devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;
+              rc_devidx <= AEK_POW_BMS63CHAIN_chain_getDevNum(rc_chainidx);
+              rc_devidx++){
+
+              if((uint8_t)(rc_devidx - 1U) >= 16U){
+                  continue;
+              }
+
+              /* Signature that MUST move when conversions are live: sum of the
+               * active-cell voltages in 0.01 mV units. A frozen (cached) chain
+               * returns byte-identical values, so this stays constant. */
+              rc_sig = 0U;
+              for(rc_cellidx = 0U; rc_cellidx < 14U; rc_cellidx++){
+                  if((AEK_POW_BMS63CHAIN_ACTIVE_CELL_MASK &
+                      (uint16_t)(1U << rc_cellidx)) != 0U){
+                      rc_sig += (uint32_t)(AEK_POW_BMS63CHAIN_app_dataChain[rc_chainidx]
+                                  .AEK_POW_BMS63CHAIN_nodeData[rc_devidx - 1U]
+                                  .AEK_POW_BMS63CHAIN_Pack_CellVoltage[rc_cellidx]
+                                  * 100000.0F);
+                  }
+              }
+
+              if(rc_sig == lastVcellSig[rc_devidx - 1U]){
+                  convStaleCnt[rc_devidx - 1U]++;
+              }
+              else{
+                  convStaleCnt[rc_devidx - 1U] = 0U;
+              }
+              lastVcellSig[rc_devidx - 1U] = rc_sig;
+
+              if(convStaleCnt[rc_devidx - 1U] >= 15U){
+                  /* SPI is still alive during the freeze, so a software reset
+                   * over SPI + re-init restarts the conversion engine. */
+                  AEK_POW_BMS63CHAIN_node_setSWReset(rc_chainidx, rc_devidx);
+                  AEK_POWBMS63CHAIN_chain_init(rc_chainidx);
+                  AEK_POW_BMS63CHAIN_node_setSilentBalancingMode(
+                      rc_chainidx, rc_devidx, AEK_POW_BMS63CHAIN_ENABLE);
+                  AEK_POW_BMS63CHAIN_node_cyclicMeasurementConversionRequest(
+                      rc_chainidx, rc_devidx, AEK_POW_BMS63CHAIN_TCYCLE_TRIGGERED);
+
+                  convStaleCnt[rc_devidx - 1U] = 0U;
+                  lastVcellSig[rc_devidx - 1U] = 0U;
+                  convRecoveryCount++;
+                  sendMessage("OK;STATE;RECOVERED_SWRESET;\r\n");
+              }
+          }
+      }
+  }
   /*
    * 3) Run the model.
    * Important: AUTO balancing is disabled in the command parser.
@@ -2286,6 +3000,10 @@ void AEK_POW_BMS63CHAIN_app_step(uint16_t AEK_POW_BMS63CHAIN_app_timeStamp)
                               .AEK_POW_BMS63CHAIN_Pack_Bal_sts[AEK_POW_BMS63CHAIN_cellidx - 1U] = 0U;
                       }
                   }
+                  AEK_POW_BMS63CHAIN_node_setSilentBalancingMode(
+                      AEK_POW_BMS63CHAIN_chainidx,
+                      AEK_POW_BMS63CHAIN_devidx,
+                      AEK_POW_BMS63CHAIN_ENABLE);
 
                   AEK_POW_BMS63CHAIN_node_setStartBal(
                       AEK_POW_BMS63CHAIN_chainidx,
@@ -2363,7 +3081,7 @@ void AEK_POW_BMS63CHAIN_app_serialStep_GUI(uint16_t AEK_POW_BMS63CHAIN_app_timeS
   static uint32_t lastSerialGuiMs = 0U;
   uint32_t nowMs = osalThreadGetMilliseconds();
 
-  char message[128];
+  static char message[128];
   char msg[16];
 
   uint8_t AEK_POW_BMS63CHAIN_chainidx = 0U;
@@ -2634,7 +3352,7 @@ void AEK_POW_BMS63CHAIN_app_serialStep(uint16_t AEK_POW_BMS63CHAIN_app_timeStamp
   static uint32_t lastSerialMs = 0U;
   uint32_t nowMs = osalThreadGetMilliseconds();
 
-  char message[128];
+  static char message[128];
 
   uint8_t AEK_POW_BMS63CHAIN_chainidx = AEK_POW_BMS63CHAIN_CHAIN0;
   uint8_t AEK_POW_BMS63CHAIN_devidx = AEK_POW_BMS63CHAIN_NODE_DEV1;

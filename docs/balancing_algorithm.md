@@ -47,10 +47,10 @@ If a user requests CELL5-CELL12, the command is rejected or the unused bits are 
 | Stop delta | 12-15 mV | Stop before chasing measurement noise |
 | Tie margin | 6 mV | Treat nearly equal high cells as equivalent candidates |
 | Sticky energy margin | 1 mAh | Avoid jumping between tied cells too often |
-| Rest-current threshold | 0.05 A | Balance only near rest |
+| Rest-current threshold | 0.1 A | Balance only near rest; raised from 0.05 A for the observed board idle draw |
 | Bench min cell voltage | 3.30 V | Block unrealistic or low bench readings |
 | Bench max cell voltage | 4.18 V | Block impossible or high bench readings |
-| Pulse ON | 60 s | Controlled removal and thermal limit |
+| Pulse ON | 180 s | Controlled removal with measured bench thermal behavior |
 | Pulse OFF | 60 s | Cooldown / relaxation interval |
 
 These values are for the current bench setup. Users must review them for their cells, wiring, thermal conditions, and test objective.
@@ -96,7 +96,7 @@ Select high-cell candidate
 Apply active-cell mask and strategy limits
   |
   v
-60 s ON pulse
+180 s ON pulse
   |
   v
 60 s OFF cooldown
@@ -160,5 +160,5 @@ With active cells around 3.44-3.52 V and near-zero pack current:
 - AUTO selects a high active cell when spread exceeds about 30 mV.
 - CELL4, CELL13, or CELL14 may be selected depending on which is highest.
 - CELL5-CELL12 never appear in the applied mask.
-- After about 60 s ON, AUTO enters cooldown.
+- After about 180 s ON, AUTO enters cooldown.
 - Energy counters rise only for the applied active cell.

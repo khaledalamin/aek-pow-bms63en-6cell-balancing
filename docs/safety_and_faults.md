@@ -31,7 +31,7 @@ The most important failure classes are:
 | RAM CRC OK | Runtime memory integrity | `RAMCRC = 0` |
 | Ground/reference faults absent | Prevents invalid measurements | no AGND/DGND/CGND/GNDREF loss |
 | Chip overtemperature absent | Prevents heating an already hot device | OT flag clear |
-| Pack current near zero | Balancing comparison should be near rest | about `abs(current) <= 0.05 A` |
+| Pack current near zero | Balancing comparison should be near rest | about `abs(current) <= 0.1 A` |
 | Active cells realistic | Blocks impossible measurement states | about 3.30-4.18 V for this bench test |
 | Unused cells blocked | Avoids heating shorted channels | applied mask never includes CELL5-CELL12 |
 
@@ -82,7 +82,7 @@ Balancing compares cell voltages to decide which cell is highest. During load or
 Current threshold used here:
 
 ```text
-abs(pack_current) <= about 0.05 A
+abs(pack_current) <= about 0.1 A
 ```
 
 ## Why Unused Cells Must Be Blocked

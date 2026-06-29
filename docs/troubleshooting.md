@@ -10,6 +10,8 @@ Run:
 TRIM?
 FAULT?
 BAL SUMMARY?
+BAL TEST?
+BAL PHASE?
 AUTO?
 ```
 
@@ -18,7 +20,7 @@ Check:
 - VREF is within the expected range;
 - VTREF is valid;
 - active-cell voltages are within the configured bench window;
-- pack current is below about 0.05 A;
+- pack current is below about 0.1 A;
 - trim/calibration flags are OK;
 - EEPROM/RAM CRC flags are clear;
 - no critical ground/reference or overtemperature fault is active.
@@ -92,6 +94,8 @@ AUTO may be waiting intentionally.
 
 Check `AUTO?` and `BAL SUMMARY?`.
 
+Use `BAL TEST?` to distinguish a real safety/communication block from a normal AUTO decision such as low delta or cooldown. Use `BAL PHASE?` to confirm whether the controller is actively balancing or intentionally cooling down.
+
 Common valid reasons:
 
 - spread is below the 30 mV start threshold;
@@ -121,14 +125,14 @@ Passive balancing is slow. With a 39 ohm resistor and 3.5 V cell:
 
 ```text
 Ibal ~= 90 mA while ON
-average ~= 45 mA with 60 s ON / 60 s OFF
+average ~= 67 mA over one 180 s ON / 60 s OFF cycle, if AUTO continues uninterrupted
 ```
 
 Expected removed charge:
 
 ```text
-20 min ~= 15 mAh
-30 min ~= 22.5 mAh
+20 min calendar time ~= 22 mAh at 75 percent duty cycle
+30 min calendar time ~= 34 mAh at 75 percent duty cycle
 960 s ON ~= 24 mAh
 ```
 

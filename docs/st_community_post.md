@@ -37,7 +37,7 @@ The project adds:
 - trim/EEPROM/RAM CRC and fault diagnostics;
 - active-cell voltage sanity checks;
 - near-zero current requirement for AUTO balancing;
-- 60 s ON / 60 s OFF pulsed passive balancing;
+- pulsed passive balancing, currently 180 s ON / 60 s OFF in this experimental firmware snapshot;
 - one-cell-at-a-time balancing as the default strategy;
 - optional experimental two-cell strategy for non-adjacent cells;
 - passive balancing energy accounting in mAh and Wh.
@@ -64,7 +64,7 @@ I also added a guard for impossible measurement states, such as all cells readin
 This is not an official ST reference design and not a safety-certified BMS. It is an experimental implementation for learning, debugging, and community discussion. I would welcome corrections, especially on the recommended wiring treatment for unused channels, diagnostic flag interpretation, and whether there is a cleaner ST-supported way to configure a reduced physical cell count on this board family.
 
 Repository:
-<insert GitHub URL here>
+https://github.com/khaledalamin/aek-pow-bms63en-6cell-balancing
 
 Thank you.
 ```

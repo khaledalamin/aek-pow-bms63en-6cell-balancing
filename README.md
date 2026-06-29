@@ -112,7 +112,7 @@ More detail: [docs/wiring_6cell_14holder.md](docs/wiring_6cell_14holder.md).
 - hard block for CELL5-CELL12 balancing;
 - manual balancing from serial terminal;
 - AUTO balancing with start/stop delta thresholds;
-- 60 s ON / 60 s OFF pulsed balancing;
+- 180 s ON / 60 s OFF pulsed balancing in the current firmware snapshot;
 - default one-cell-at-a-time `FAIR_SINGLE` strategy;
 - experimental `MULTI2` strategy for up to two non-adjacent high cells with constraints;
 - sticky/tie-aware selection to reduce ADC-noise-driven cell hopping;
@@ -137,7 +137,7 @@ Ibal = 3.5 V / 39 ohm = 0.0897 A, about 90 mA
 Pbal = 3.5^2 / 39 = 0.314 W
 ```
 
-With a 60 s ON / 60 s OFF pulse schedule, average balancing current is about 45 mA. Passive balancing is therefore slow: 20-30 minutes may remove only about 15-25 mAh from a high cell. Voltage drop is not linear with removed mAh because lithium-ion cell voltage depends on SOC curve shape, relaxation, temperature, load history, internal resistance, and measurement timing.
+With the current 180 s ON / 60 s OFF pulse schedule, the long-term average balancing current is about 75 percent of the ON-current, assuming AUTO remains active and no safety/cooldown condition interrupts it. Passive balancing is still slow: useful validation should rely on ON-time and removed-mAh accounting, not only instantaneous cell-voltage drop. Voltage drop is not linear with removed mAh because lithium-ion cell voltage depends on SOC curve shape, relaxation, temperature, load history, internal resistance, and measurement timing.
 
 Balancing is normally done near rest so the voltage comparison is not dominated by load current or recovery effects.
 
@@ -152,9 +152,9 @@ Default thresholds used in this experimental firmware:
 | Start delta | about 30 mV | Avoid balancing on noise or insignificant spread |
 | Stop delta | about 12-15 mV | Stop before chasing unrealistic zero difference |
 | Tie margin | about 6 mV | Treat nearly equal high cells as tied |
-| Rest current threshold | about 0.05 A | Balance only near rest |
+| Rest current threshold | about 0.1 A | Balance only near rest; raised from 0.05 A after the board idle draw was observed |
 | Bench voltage window | about 3.30-4.18 V | Block impossible or unsafe bench measurements |
-| Pulse ON time | 60 s | Limit heating and allow controlled removal |
+| Pulse ON time | 180 s | Controlled removal with measured bench thermal behavior |
 | Pulse OFF time | 60 s | Cooldown / relaxation interval |
 
 Zero-difference balancing is not realistic. ADC noise, cell relaxation, wiring resistance, temperature differences, and cell chemistry all move the reported voltage by several millivolts. The firmware therefore balances only when the spread is meaningful and stops when the pack is close enough for this bench configuration.
@@ -175,6 +175,8 @@ More detail: [docs/balancing_algorithm.md](docs/balancing_algorithm.md).
 | `BAL ENERGY RESET` | Reset balancing energy counters |
 | `BAL SAFETY?` | Print safety gate status |
 | `BAL STATE?` | Print AUTO/balancing state |
+| `BAL TEST?` | Print compact safety, SPI, VREF, current, strategy, and mask diagnostics |
+| `BAL PHASE?` | Print current phase, active/cooldown status, and remaining timing |
 | `AUTO?` | Print AUTO diagnostic details |
 | `FAULT?` | Print relevant fault/status flags |
 | `TRIM?` | Print trim/calibration/CRC status |
@@ -291,6 +293,21 @@ During the first test, run AUTO only briefly. Confirm the selected cell is one o
 
 Full protocol: [docs/testing_protocol.md](docs/testing_protocol.md).
 
+## Verification and Data Notes
+
+Bench verification for the current firmware included:
+
+- same physical wiring before and after the firmware fixes;
+- stable realistic active-cell readings for CELL1-CELL4 and CELL13-CELL14;
+- VREF observed around 4.97 V;
+- healthy SPI/BMS status during normal operation;
+- heating problem removed during normal operation;
+- manual and AUTO balancing constrained to `ACTIVE_CELL_MASK = 0x300F`;
+- CELL5-CELL12 blocked from all applied balancing masks;
+- AUTO/MULTI2 tested successfully after the pack was above the configured minimum-cell gate.
+
+See [docs/verification_summary.md](docs/verification_summary.md). Raw acquisition datasets are not included in this checkout; add or link them separately if publishing dataset files.
+
 ## Repository Layout
 
 ```text
@@ -323,7 +340,7 @@ Full protocol: [docs/testing_protocol.md](docs/testing_protocol.md).
 
 ## Future Work
 
-- Add data acquisition logs and scripts for long balancing characterization.
+- Add or link data acquisition logs and scripts for long balancing characterization.
 - Add plots for cell voltage, selected balancing mask, removed mAh, and temperature.
 - Add a screenshot from the ST GUI showing an active CELL13 balancing event.
 - Add measured resistor thermal data during long ON/OFF cycles.

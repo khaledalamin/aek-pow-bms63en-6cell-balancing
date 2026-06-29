@@ -54,6 +54,8 @@ Run diagnostics:
 TRIM?
 FAULT?
 BAL SAFETY?
+BAL TEST?
+BAL PHASE?
 BAL SUMMARY?
 ```
 
@@ -62,6 +64,7 @@ Good expected patterns:
 - trim/calibration OK;
 - EEPROM/RAM CRC flags clear;
 - VREF around expected range, observed about 4.97 V;
+- SPI/BMS status healthy in the compact test report;
 - current near zero;
 - active cell voltages realistic;
 - applied balancing mask is zero.
@@ -118,6 +121,8 @@ ERR;BAL;CELL_NOT_ALLOWED;
 BAL ENERGY RESET
 BAL AUTO
 AUTO?
+BAL TEST?
+BAL PHASE?
 BAL SUMMARY?
 ```
 
@@ -149,7 +154,7 @@ Only after the short test is clean:
 
 1. Reset energy counters.
 2. Start AUTO in `FAIR_SINGLE`.
-3. Log `AUTO?`, `BAL?`, `BAL SUMMARY?`, and `BAL ENERGY?`.
+3. Log `AUTO?`, `BAL?`, `BAL TEST?`, `BAL PHASE?`, `BAL SUMMARY?`, and `BAL ENERGY?`.
 4. Record DMM spot checks.
 5. Check resistor/board temperature periodically.
 6. Stop after a planned duration.
@@ -193,6 +198,7 @@ BAL OFF
 Stop immediately with `BAL OFF` if:
 
 - VREF is invalid;
+- SPI/BMS communication state is invalid or stale;
 - any active cell reads impossible voltage;
 - any unused cell is requested or active;
 - pack current is not near zero during AUTO balancing;

@@ -59,7 +59,7 @@ AUTO logic:
 - starts above about 30 mV spread;
 - stops around 12-15 mV spread;
 - requires near-zero current;
-- uses 60 s ON / 60 s OFF pulsed balancing;
+- uses 180 s ON / 60 s OFF pulsed balancing in the current firmware snapshot;
 - defaults to one cell at a time.
 
 Reported states:
