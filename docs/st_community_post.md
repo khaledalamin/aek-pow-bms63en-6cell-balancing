@@ -3,7 +3,7 @@
 Title suggestion:
 
 ```text
-AEK-POW-BMS63EN / L9963E: experimental 6-cell passive balancing on a 14-cell holder setup
+AEK-POW-BMS63EN / L9963E: experimental 6-cell passive balancing on a 14-cell holder setup (link: https://community.st.com/automotive-mcus-51/safety-clarification-request-aek-pow-bms63en-aek-pow-bmshold-with-7-cell-configuration-165359)
 ```
 
 Post draft:
